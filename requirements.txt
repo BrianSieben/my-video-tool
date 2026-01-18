@@ -2,5 +2,6 @@ streamlit
 scenedetect[opencv]
 opencv-python-headless
 numpy
-google-generativeai
 pandas
+google-generativeai
+xlsxwriter
