@@ -3,205 +3,135 @@ import cv2
 import os
 import shutil
 import numpy as np
-from scenedetect import detect, ContentDetector
+import pandas as pd
 import google.generativeai as genai
-import json # 用于格式化输出 JSON
+import json
+import io
+from scenedetect import detect, ContentDetector
 
-# --- 1. 页面配置与高级美化 ---
+# --- 1. 页面配置 ---
 st.set_page_config(page_title="VisionShot AI Pro", layout="wide", page_icon="🎬")
 
-# 注入自定义 CSS，增强视觉质感
 st.markdown("""
     <style>
-    .stApp { background-color: #f8fafd; font-family: 'Inter', -apple-system, sans-serif; }
+    .stApp { background-color: #f8fafd; }
     .main-title {
-        font-size: 3rem !important; font-weight: 800;
+        font-size: 2.8rem !important; font-weight: 800;
         background: -webkit-linear-gradient(#1e3a8a, #3b82f6);
         -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        margin-bottom: 0.5rem;
     }
-    /* 镜头容器样式 */
-    .shot-header {
-        background-color: #1e3a8a; color: white; padding: 5px 15px;
-        border-radius: 5px; margin-top: 20px; margin-bottom: 10px;
-    }
-    /* 分析按钮的样式 */
-    .stButton>button[key*="analyze_btn"] {
-        background-color: #6c757d; /* 灰色 */
-        border-color: #6c757d;
-        color: white;
-        margin-top: 5px;
-        padding: 5px 10px;
-        font-size: 0.8rem;
-    }
-    .stButton>button[key*="analyze_btn"]:hover {
-        background-color: #5a6268;
-        border-color: #5a6268;
-    }
+    .shot-header { background-color: #1e3a8a; color: white; padding: 5px 15px; border-radius: 5px; margin: 25px 0 10px 0; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 2. Gemini API 配置 ---
+# --- 2. Gemini 配置 ---
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    GEMINI_MODEL = genai.GenerativeModel('gemini-pro-vision')
+    # 优先从 Secrets 读取
+    api_key = st.secrets.get("GEMINI_API_KEY")
+    if api_key:
+        genai.configure(api_key=api_key)
+        # 使用最新的 1.5-flash 模型
+        model = genai.GenerativeModel('gemini-1.5-flash')
+    else:
+        st.warning("⚠️ 未在 Secrets 中找到 GEMINI_API_KEY")
+        model = None
 except Exception as e:
-    st.error(f"⚠️ Gemini API 配置错误，请检查您的 Streamlit Secrets。详细错误：{e}")
-    GEMINI_MODEL = None
+    st.error(f"❌ Gemini 初始化失败: {e}")
+    model = None
 
-# --- 3. Gemini 图片分析函数 ---
-def analyze_image_with_gemini(image_data):
-    if GEMINI_MODEL is None:
-        return {"error": "Gemini 模型未初始化，无法进行图片分析。"}
-
-    prompt_parts = [
-        "你是一个专业的图像分析师和市场营销专家。请详细分析以下图片，输出一个 JSON 格式的结构化数据，用于描述图片的视觉风格、内容、光照、纹理、氛围，并生成两个潜在的英文prompt。",
-        "图片分析维度（仅参考，可自行判断增减）：",
-        "{",
-        "  \"visual_style_analysis\": {",
-        "    \"overall_mood\": \"\",",
-        "    \"color_palette\": {",
-        "      \"dominant_colors\": [],",
-        "      \"temperature\": \"\",",
-        "      \"saturation\": \"\"",
-        "    },",
-        "    \"composition\": {",
-        "      \"framing\": \"\",",
-        "      \"perspective\": \"\",",
-        "      \"rule_of_thirds\": \"\",",
-        "      \"action\": \"\"",
-        "    }",
-        "  },",
-        "  \"content_analysis\": {",
-        "    \"subjects\": \"\",",
-        "    \"objects\": \"\",",
-        "    \"scene\": \"\",",
-        "    \"action\": \"\"",
-        "  },",
-        "  \"lighting_and_color\": {",
-        "    \"lighting\": \"\",",
-        "    \"color_contrast\": \"\"",
-        "  },",
-        "  \"texture_and_materials\": {",
-        "    \"description\": \"\"",
-    "  },",
-        "  \"atmosphere_and_mood\": \"\",",
-        "  \"potential_prompts\": []",
-        "}",
-        "请直接输出符合上述JSON结构的分析结果，不要包含任何额外文字或解释。"
-    ]
-
+# --- 3. 核心工具函数 ---
+def analyze_image(image_bytes):
+    """调用 Gemini 分析图片"""
+    if not model: return {"error": "API未配置"}
+    prompt = "你是一个专业图像分析师。请分析图片并输出 JSON，包含 visual_style_analysis, content_analysis, atmosphere, potential_prompts。仅输出纯JSON。"
     try:
-        image_part = {
-            "mime_type": "image/jpeg",
-            "data": image_data
-        }
-        response = GEMINI_MODEL.generate_content(prompt_parts + [image_part])
-        # 尝试解析 Gemini 返回的文本为 JSON
-        json_output = json.loads(response.text.strip())
-        return json_output
-    except json.JSONDecodeError as e:
-        st.error(f"Gemini 返回的不是有效的 JSON 格式，请稍后再试或检查提示词。详细错误: {e}")
-        st.code(response.text) # 显示原始响应以便调试
-        return {"error": f"Gemini 返回格式错误：{e}"}
+        response = model.generate_content([
+            prompt,
+            {"mime_type": "image/jpeg", "data": image_bytes}
+        ])
+        # 移除 Markdown 代码块标记
+        txt = response.text.replace('```json', '').replace('```', '').strip()
+        return json.loads(txt)
     except Exception as e:
-        st.error(f"Gemini API 调用失败: {e}")
-        return {"error": f"API调用失败: {e}"}
+        return {"error": str(e)}
 
-# --- 4. 侧边栏 ---
-with st.sidebar:
-    st.markdown("### 🛠️ 核心参数")
-    threshold = st.slider("识别灵敏度", 10.0, 50.0, 27.0, help="数值越小，识别出的镜头越多")
-    st.markdown("---")
-    st.markdown("#### 功能说明")
-    st.write("1. 自动识别镜头切换\n2. 每个镜头提取 4 帧\n3. 支持打包下载 ZIP\n4. **新增：AI 智能图片分析 (Powered by Gemini)**")
-    st.caption("VisionShot AI v1.2")
+def flatten_dict(d, parent_key='', sep=' -> '):
+    """将嵌套 JSON 展平为表格格式"""
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, f"{new_key}{sep}", sep=sep).items())
+        else:
+            items.append((new_key, str(v)))
+    return dict(items)
 
-# --- 5. 主界面布局 ---
+# --- 4. 主流程 ---
 st.markdown('<p class="main-title">🎬 VisionShot AI Pro</p>', unsafe_allow_html=True)
-st.markdown("<p style='color: #64748b; font-size: 1.1rem;'>智能视频镜头拆解专家 - 现已支持每个镜头提取 4 帧预览及 AI 分析</p>", unsafe_allow_html=True)
-
-uploaded_file = st.file_uploader("请上传视频文件", type=["mp4", "mov", "avi"])
+uploaded_file = st.file_uploader("第一步：上传视频文件", type=["mp4", "mov", "avi"])
 
 if uploaded_file:
     video_path = "temp_video.mp4"
     output_dir = "output_frames"
     
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
-
     with open(video_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    if st.button("🚀 开始深度分析", key="main_analysis_btn"):
-        if os.path.exists(output_dir):
-            shutil.rmtree(output_dir)
+    if st.button("🚀 第二步：开始提取镜头", key="run_main"):
+        if os.path.exists(output_dir): shutil.rmtree(output_dir)
         os.makedirs(output_dir)
 
-        with st.spinner("AI 正在扫描并计算关键帧..."):
-            scene_list = detect(video_path, ContentDetector(threshold=threshold))
+        with st.spinner("AI 正在扫描场景..."):
+            scene_list = detect(video_path, ContentDetector(threshold=27.0))
             cap = cv2.VideoCapture(video_path)
             
-            if not scene_list:
-                st.warning("未能识别出明显的镜头切换，请调低灵敏度后再试。")
-            else:
-                for i, scene in enumerate(scene_list):
-                    start_frame = scene[0].get_frames()
-                    end_frame = scene[1].get_frames() - 1
-                    duration = end_frame - start_frame
-                    
-                    mid_1 = start_frame + int(duration * 0.33)
-                    mid_2 = start_frame + int(duration * 0.66)
-                    
-                    st.markdown(f'<div class="shot-header">🎞️ 镜头 {i+1:02d}</div>', unsafe_allow_html=True)
-                    
-                    cols = st.columns(4)
-                    
-                    extract_plan = [
-                        (start_frame, '首帧'),
-                        (mid_1, '过程1'),
-                        (mid_2, '过程2'),
-                        (end_frame, '尾帧')
-                    ]
-                    
-                    for idx, (f_idx, label) in enumerate(extract_plan):
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
-                        ret, frame = cap.read()
-                        if ret:
-                            img_name = f"shot_{i+1:03d}_{idx}_{label}.jpg"
-                            img_path = os.path.join(output_dir, img_name)
-                            cv2.imwrite(img_path, frame)
-                            
-                            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            with cols[idx]:
-                                st.image(frame_rgb, caption=f"{label} (F:{f_idx})", use_container_width=True)
-                                
-                                # --- 新增：图片分析按钮 ---
-                                # 读取图片字节数据用于 Gemini
-                                with open(img_path, "rb") as f:
-                                    image_bytes_for_gemini = f.read()
-
-                                if st.button("🖼️ 分析图片", key=f"analyze_btn_{i}_{idx}"):
-                                    with st.spinner(f"AI 正在分析 {label} (F:{f_idx})..."):
-                                        analysis_result = analyze_image_with_gemini(image_bytes_for_gemini)
-                                        
-                                        with st.expander(f"AI 分析结果 - 镜头 {i+1:02d} {label} (F:{f_idx})"):
-                                            if "error" in analysis_result:
-                                                st.error(analysis_result["error"])
-                                            else:
-                                                st.json(analysis_result)
+            for i, scene in enumerate(scene_list):
+                start = scene[0].get_frames()
+                end = scene[1].get_frames() - 1
+                duration = end - start
                 
-                cap.release()
-                st.success(f"✅ 处理完成！共分析出 {len(scene_list)} 个镜头。")
-                st.balloons()
-
-                shutil.make_archive("result_frames", 'zip', output_dir)
-                with open("result_frames.zip", "rb") as f:
-                    st.download_button(
-                        label="📥 一键下载所有 4 帧截图 (ZIP)",
-                        data=f,
-                        file_name="visionshot_full_package.zip",
-                        mime="application/zip"
-                    )
-else:
-    st.info("👋 欢迎！上传视频后点击按钮，AI 会自动为您分析每一秒的内容。")
+                st.markdown(f'<div class="shot-header">🎞️ 镜头 {i+1:02d}</div>', unsafe_allow_html=True)
+                cols = st.columns(4)
+                # 定义 4 个关键帧点
+                points = [(start, '首帧'), (start+int(duration*0.33), '过程1'), (start+int(duration*0.66), '过程2'), (end, '尾帧')]
+                
+                for idx, (f_idx, label) in enumerate(points):
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, f_idx)
+                    ret, frame = cap.read()
+                    if ret:
+                        img_path = os.path.join(output_dir, f"shot_{i+1}_{idx}.jpg")
+                        cv2.imwrite(img_path, frame)
+                        with cols[idx]:
+                            st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), caption=label, use_container_width=True)
+                            
+                            # --- AI 分析区 ---
+                            if st.button(f"🔍 分析图片", key=f"ai_{i}_{idx}"):
+                                with st.spinner("Gemini 分析中..."):
+                                    with open(img_path, "rb") as imf:
+                                        res = analyze_image(imf.read())
+                                    
+                                    if "error" not in res:
+                                        # 转换数据为 DataFrame 供编辑
+                                        flat = flatten_dict(res)
+                                        df = pd.DataFrame(list(flat.items()), columns=["分析维度", "描述内容"])
+                                        
+                                        # 渲染可编辑表格
+                                        edited_df = st.data_editor(df, use_container_width=True, key=f"edt_{i}_{idx}")
+                                        
+                                        # 导出功能
+                                        output = io.BytesIO()
+                                        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                                            edited_df.to_excel(writer, index=False, sheet_name='AI分析')
+                                        
+                                        st.download_button(
+                                            label="📥 导出为 Excel",
+                                            data=output.getvalue(),
+                                            file_name=f"analysis_shot_{i+1}_{label}.xlsx",
+                                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                                        )
+                                        
+                                        with st.expander("查看原始 JSON"):
+                                            st.json(res)
+                                    else:
+                                        st.error(res["error"])
+            cap.release()
