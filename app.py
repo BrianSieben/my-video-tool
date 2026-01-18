@@ -12,19 +12,7 @@ from scenedetect import detect, ContentDetector
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="VisionShot AI Pro", layout="wide", page_icon="🎬")
 
-st.markdown("""
-    <style>
-    .stApp { background-color: #f8fafd; }
-    .main-title {
-        font-size: 2.8rem !important; font-weight: 800;
-        background: -webkit-linear-gradient(#1e3a8a, #3b82f6);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    }
-    .shot-header { background-color: #1e3a8a; color: white; padding: 5px 15px; border-radius: 5px; margin: 25px 0 10px 0; }
-    </style>
-    """, unsafe_allow_html=True)
-
-# --- 2. Gemini 配置 ---
+# --- 2. Gemini 初始化 ---
 def init_gemini():
     try:
         api_key = st.secrets.get("GEMINI_API_KEY")
@@ -40,7 +28,7 @@ model = init_gemini()
 # --- 3. 核心功能 ---
 def analyze_image(image_bytes):
     if not model: return {"error": "API Key 未配置"}
-    prompt = "分析此图并输出 JSON：visual_style_analysis, content_analysis, potential_prompts。仅输出纯JSON。"
+    prompt = "请作为专家分析此图，输出 JSON 格式，包含视觉、内容和氛围维度。仅输出纯 JSON。"
     try:
         response = model.generate_content([
             prompt,
@@ -61,8 +49,8 @@ def flatten_dict(d, parent_key='', sep=' -> '):
             items.append((new_key, str(v)))
     return dict(items)
 
-# --- 4. 界面流程 ---
-st.markdown('<p class="main-title">🎬 VisionShot AI Pro</p>', unsafe_allow_html=True)
+# --- 4. 界面展示 ---
+st.title("🎬 VisionShot AI Pro")
 uploaded_file = st.file_uploader("上传视频文件", type=["mp4", "mov", "avi"])
 
 if uploaded_file:
@@ -71,7 +59,7 @@ if uploaded_file:
     with open(video_path, "wb") as f:
         f.write(uploaded_file.getbuffer())
 
-    if st.button("🚀 开始提取并分析"):
+    if st.button("🚀 开始分析"):
         if os.path.exists(output_dir): shutil.rmtree(output_dir)
         os.makedirs(output_dir)
 
@@ -82,7 +70,7 @@ if uploaded_file:
             start = scene[0].get_frames()
             end = scene[1].get_frames() - 1
             duration = end - start
-            st.markdown(f'<div class="shot-header">🎞️ 镜头 {i+1:02d}</div>', unsafe_allow_html=True)
+            st.subheader(f"🎞️ 镜头 {i+1:02d}")
             
             cols = st.columns(4)
             points = [(start, '首帧'), (start+int(duration*0.33), '中1'), (start+int(duration*0.66), '中2'), (end, '尾帧')]
@@ -100,13 +88,13 @@ if uploaded_file:
                             if "error" not in res:
                                 flat = flatten_dict(res)
                                 df = pd.DataFrame(list(flat.items()), columns=["维度", "内容"])
-                                # 编辑表格
+                                # 可编辑表格
                                 edited_df = st.data_editor(df, use_container_width=True, key=f"ed_{i}_{idx}")
                                 # 导出 Excel
                                 output = io.BytesIO()
                                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                                     edited_df.to_excel(writer, index=False)
-                                st.download_button("📥 下载 Excel", output.getvalue(), f"shot_{i+1}.xlsx", "application/vnd.ms-excel")
+                                st.download_button("📥 下载 Excel", output.getvalue(), f"shot_{i+1}.xlsx")
                             else:
                                 st.error(res["error"])
         cap.release()
